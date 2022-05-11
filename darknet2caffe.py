@@ -1,30 +1,29 @@
 import sys
-sys.path.append('./utils/')
 import caffe
 import numpy as np
 from collections import OrderedDict
 from cfg import *
 from prototxt import *
- 
+
 def darknet2caffe(cfgfile, weightfile, protofile, caffemodel):
     net_info = cfg2prototxt(cfgfile)
     save_prototxt(net_info , protofile, region=False)
- 
+
     net = caffe.Net(protofile, caffe.TEST)
     params = net.params
- 
+
     blocks = parse_cfg(cfgfile)
- 
+
     #Open the weights file
     fp = open(weightfile, "rb")
- 
-    #The first 4 values are header information 
+
+    #The first 4 values are header information
     # 1. Major version number
     # 2. Minor Version Number
-    # 3. Subversion number 
-    # 4. IMages seen 
+    # 3. Subversion number
+    # 4. IMages seen
     header = np.fromfile(fp, dtype = np.int32, count = 5)
- 
+
     #fp = open(weightfile, 'rb')
     #header = np.fromfile(fp, count=5, dtype=np.int32)
     #header = np.ndarray(shape=(5,),dtype='int32',buffer=fp.read(20))
@@ -32,14 +31,14 @@ def darknet2caffe(cfgfile, weightfile, protofile, caffemodel):
     buf = np.fromfile(fp, dtype = np.float32)
     #print(buf)
     fp.close()
- 
+
     layers = []
-    layer_id = 1
+    layer_id = 0
     start = 0
     for block in blocks:
         if start >= buf.size:
             break
- 
+
         if block['type'] == 'net':
             continue
         elif block['type'] == 'convolutional':
@@ -52,7 +51,23 @@ def darknet2caffe(cfgfile, weightfile, protofile, caffemodel):
                 conv_layer_name = 'layer%d-conv' % layer_id
                 bn_layer_name = 'layer%d-bn' % layer_id
                 scale_layer_name = 'layer%d-scale' % layer_id
- 
+
+            if batch_normalize:
+                start = load_conv_bn2caffe(buf, start, params[conv_layer_name], params[bn_layer_name], params[scale_layer_name])
+            else:
+                start = load_conv2caffe(buf, start, params[conv_layer_name])
+            layer_id = layer_id+1
+        elif block['type'] == 'depthwise_convolutional':
+            batch_normalize = int(block['batch_normalize'])
+            if block.has_key('name'):
+                conv_layer_name = block['name']
+                bn_layer_name = '%s-bn' % block['name']
+                scale_layer_name = '%s-scale' % block['name']
+            else:
+                conv_layer_name = 'layer%d-dwconv' % layer_id
+                bn_layer_name = 'layer%d-bn' % layer_id
+                scale_layer_name = 'layer%d-scale' % layer_id
+
             if batch_normalize:
                 start = load_conv_bn2caffe(buf, start, params[conv_layer_name], params[bn_layer_name], params[scale_layer_name])
             else:
@@ -88,58 +103,57 @@ def darknet2caffe(cfgfile, weightfile, protofile, caffemodel):
     save_prototxt(net_info , protofile, region=True)
     print('save caffemodel to %s' % caffemodel)
     net.save(caffemodel)
- 
+
 def load_conv2caffe(buf, start, conv_param):
     weight = conv_param[0].data
     bias = conv_param[1].data
     conv_param[1].data[...] = np.reshape(buf[start:start+bias.size], bias.shape);   start = start + bias.size
     conv_param[0].data[...] = np.reshape(buf[start:start+weight.size], weight.shape); start = start + weight.size
     return start
- 
+
 def load_fc2caffe(buf, start, fc_param):
     weight = fc_param[0].data
     bias = fc_param[1].data
     fc_param[1].data[...] = np.reshape(buf[start:start+bias.size], bias.shape);   start = start + bias.size
     fc_param[0].data[...] = np.reshape(buf[start:start+weight.size], weight.shape); start = start + weight.size
     return start
- 
- 
+
+
 def load_conv_bn2caffe(buf, start, conv_param, bn_param, scale_param):
     conv_weight = conv_param[0].data
     running_mean = bn_param[0].data
     running_var = bn_param[1].data
     scale_weight = scale_param[0].data
     scale_bias = scale_param[1].data
- 
-    
-   
+
+
+
     scale_param[1].data[...] = np.reshape(buf[start:start+scale_bias.size], scale_bias.shape); start = start + scale_bias.size
     #print scale_bias.size
     #print scale_bias
- 
+
     scale_param[0].data[...] = np.reshape(buf[start:start+scale_weight.size], scale_weight.shape); start = start + scale_weight.size
     #print scale_weight.size
- 
+
     bn_param[0].data[...] = np.reshape(buf[start:start+running_mean.size], running_mean.shape); start = start + running_mean.size
     #print running_mean.size
- 
+
     bn_param[1].data[...] = np.reshape(buf[start:start+running_var.size], running_var.shape); start = start + running_var.size
     #print running_var.size
- 
+
     bn_param[2].data[...] = np.array([1.0])
     conv_param[0].data[...] = np.reshape(buf[start:start+conv_weight.size], conv_weight.shape); start = start + conv_weight.size
     #print conv_weight.size
- 
+
     return start
- 
+
 def cfg2prototxt(cfgfile):
-    print("aaaaaaaaaaaaaaa")
     blocks = parse_cfg(cfgfile)
- 
+
     layers = []
-    props = OrderedDict() 
+    props = OrderedDict()
     bottom = 'data'
-    layer_id = 1
+    layer_id = 0
     topnames = dict()
     for block in blocks:
         if block['type'] == 'net':
@@ -162,9 +176,14 @@ def cfg2prototxt(cfgfile):
             conv_layer['type'] = 'Convolution'
             convolution_param = OrderedDict()
             convolution_param['num_output'] = block['filters']
+            if 'size' not in block.keys():
+                block['size'] = 1
+
             convolution_param['kernel_size'] = block['size']
             if block['pad'] == '1':
                 convolution_param['pad'] = str(int(convolution_param['kernel_size'])/2)
+            if 'stride' not in block.keys():
+                block['stride'] = 1
             convolution_param['stride'] = block['stride']
             if block['batch_normalize'] == '1':
                 convolution_param['bias_term'] = 'false'
@@ -173,7 +192,7 @@ def cfg2prototxt(cfgfile):
             conv_layer['convolution_param'] = convolution_param
             layers.append(conv_layer)
             bottom = conv_layer['top']
- 
+
             if block['batch_normalize'] == '1':
                 bn_layer = OrderedDict()
                 bn_layer['bottom'] = bottom
@@ -187,7 +206,7 @@ def cfg2prototxt(cfgfile):
                 batch_norm_param['use_global_stats'] = 'true'
                 bn_layer['batch_norm_param'] = batch_norm_param
                 layers.append(bn_layer)
- 
+
                 scale_layer = OrderedDict()
                 scale_layer['bottom'] = bottom
                 scale_layer['top'] = bottom
@@ -200,7 +219,74 @@ def cfg2prototxt(cfgfile):
                 scale_param['bias_term'] = 'true'
                 scale_layer['scale_param'] = scale_param
                 layers.append(scale_layer)
- 
+
+            if block['activation'] != 'linear':
+                relu_layer = OrderedDict()
+                relu_layer['bottom'] = bottom
+                relu_layer['top'] = bottom
+                if block.has_key('name'):
+                    relu_layer['name'] = '%s-act' % block['name']
+                else:
+                    relu_layer['name'] = 'layer%d-act' % layer_id
+                relu_layer['type'] = 'ReLU'
+                if block['activation'] == 'leaky':
+                    relu_param = OrderedDict()
+                    relu_param['negative_slope'] = '0.1'
+                    relu_layer['relu_param'] = relu_param
+                layers.append(relu_layer)
+            topnames[layer_id] = bottom
+            layer_id = layer_id+1
+        elif block['type'] == 'depthwise_convolutional':
+            conv_layer = OrderedDict()
+            conv_layer['bottom'] = bottom
+            if block.has_key('name'):
+                conv_layer['top'] = block['name']
+                conv_layer['name'] = block['name']
+            else:
+                conv_layer['top'] = 'layer%d-dwconv' % layer_id
+                conv_layer['name'] = 'layer%d-dwconv' % layer_id
+            conv_layer['type'] = 'ConvolutionDepthwise'
+            convolution_param = OrderedDict()
+            convolution_param['num_output'] = prev_filters
+            convolution_param['kernel_size'] = block['size']
+            if block['pad'] == '1':
+                convolution_param['pad'] = str(int(convolution_param['kernel_size']) // 2)
+            convolution_param['stride'] = block['stride']
+            if block['batch_normalize'] == '1':
+                convolution_param['bias_term'] = 'false'
+            else:
+                convolution_param['bias_term'] = 'true'
+            conv_layer['convolution_param'] = convolution_param
+            layers.append(conv_layer)
+            bottom = conv_layer['top']
+
+            if block['batch_normalize'] == '1':
+                bn_layer = OrderedDict()
+                bn_layer['bottom'] = bottom
+                bn_layer['top'] = bottom
+                if block.has_key('name'):
+                    bn_layer['name'] = '%s-bn' % block['name']
+                else:
+                    bn_layer['name'] = 'layer%d-bn' % layer_id
+                bn_layer['type'] = 'BatchNorm'
+                batch_norm_param = OrderedDict()
+                batch_norm_param['use_global_stats'] = 'true'
+                bn_layer['batch_norm_param'] = batch_norm_param
+                layers.append(bn_layer)
+
+                scale_layer = OrderedDict()
+                scale_layer['bottom'] = bottom
+                scale_layer['top'] = bottom
+                if block.has_key('name'):
+                    scale_layer['name'] = '%s-scale' % block['name']
+                else:
+                    scale_layer['name'] = 'layer%d-scale' % layer_id
+                scale_layer['type'] = 'Scale'
+                scale_param = OrderedDict()
+                scale_param['bias_term'] = 'true'
+                scale_layer['scale_param'] = scale_param
+                layers.append(scale_layer)
+
             if block['activation'] != 'linear':
                 relu_layer = OrderedDict()
                 relu_layer['bottom'] = bottom
@@ -228,11 +314,22 @@ def cfg2prototxt(cfgfile):
                 max_layer['name'] = 'layer%d-maxpool' % layer_id
             max_layer['type'] = 'Pooling'
             pooling_param = OrderedDict()
-            pooling_param['kernel_size'] = block['size']
-            pooling_param['stride'] = block['stride']
             pooling_param['pool'] = 'MAX'
-            if block.has_key('pad') and int(block['pad']) == 1:
-                pooling_param['pad'] = str((int(block['size'])-1)/2)
+
+            if not block.has_key('stride'):
+                block['stride'] = 1
+            pooling_param['stride'] = block['stride']
+
+            if not block.has_key('size'):
+                pooling_param['kernel_size'] = block['stride']
+            else:
+                pooling_param['kernel_size'] = block['size']
+
+            if not block.has_key('padding'):
+                pooling_param['pad'] = str((int(pooling_param['kernel_size']) - 1)/2)
+            else:
+                pooling_param['pad'] = block['padding']
+
             max_layer['pooling_param'] = pooling_param
             layers.append(max_layer)
             bottom = max_layer['top']
@@ -277,26 +374,21 @@ def cfg2prototxt(cfgfile):
                 bottom = region_layer['top']
             topnames[layer_id] = bottom
             layer_id = layer_id + 1
- 
+
         elif block['type'] == 'route':
             route_layer = OrderedDict()
             layer_name = str(block['layers']).split(',')
-            #print(layer_name[0])
             bottom_layer_size = len(str(block['layers']).split(','))
-              #print(bottom_layer_size)
-            if(1 == bottom_layer_size):
-                prev_layer_id = layer_id + int(block['layers'])
+            bottoms = []
+            for i in range(bottom_layer_size):
+                if int(layer_name[i]) < 0:
+                    prev_layer_id = layer_id + int(layer_name[i])
+                else:
+                    prev_layer_id = int(layer_name[i])
                 bottom = topnames[prev_layer_id]
-                #topnames[layer_id] = bottom
-                route_layer['bottom'] = bottom
-            if(2 == bottom_layer_size):
-                prev_layer_id1 = layer_id + int(layer_name[0])
-                #print(prev_layer_id1)
-                prev_layer_id2 = int(layer_name[1]) + 1
-                print(topnames)
-                bottom1 = topnames[prev_layer_id1]
-                bottom2 = topnames[prev_layer_id2]
-                route_layer['bottom'] = [bottom1, bottom2]
+                bottoms.append(bottom)
+            route_layer['bottom'] = bottoms
+
             if block.has_key('name'):
                 route_layer['top'] = block['name']
                 route_layer['name'] = block['name']
@@ -304,16 +396,13 @@ def cfg2prototxt(cfgfile):
                 route_layer['top'] = 'layer%d-route' % layer_id
                 route_layer['name'] = 'layer%d-route' % layer_id
             route_layer['type'] = 'Concat'
-            print(route_layer)
             layers.append(route_layer)
             bottom = route_layer['top']
-            print(layer_id)
             topnames[layer_id] = bottom
             layer_id = layer_id + 1
- 
+
         elif block['type'] == 'upsample':
             upsample_layer = OrderedDict()
-            print(block['stride'])
             upsample_layer['bottom'] = bottom
             if block.has_key('name'):
                 upsample_layer['top'] = block['name']
@@ -323,15 +412,15 @@ def cfg2prototxt(cfgfile):
                 upsample_layer['name'] = 'layer%d-upsample' % layer_id
             upsample_layer['type'] = 'Upsample'
             upsample_param = OrderedDict()
+            if not block.has_key('stride') :
+                block['stride'] = 2
             upsample_param['scale'] = block['stride']
             upsample_layer['upsample_param'] = upsample_param
-            print(upsample_layer)
             layers.append(upsample_layer)
             bottom = upsample_layer['top']
-            print('upsample:',layer_id)
             topnames[layer_id] = bottom
             layer_id = layer_id + 1
- 
+
         elif block['type'] == 'shortcut':
             prev_layer_id1 = layer_id + int(block['from'])
             prev_layer_id2 = layer_id - 1
@@ -351,7 +440,7 @@ def cfg2prototxt(cfgfile):
             shortcut_layer['eltwise_param'] = eltwise_param
             layers.append(shortcut_layer)
             bottom = shortcut_layer['top']
- 
+
             if block['activation'] != 'linear':
                 relu_layer = OrderedDict()
                 relu_layer['bottom'] = bottom
@@ -367,8 +456,8 @@ def cfg2prototxt(cfgfile):
                     relu_layer['relu_param'] = relu_param
                 layers.append(relu_layer)
             topnames[layer_id] = bottom
-            layer_id = layer_id + 1           
-            
+            layer_id = layer_id + 1
+
         elif block['type'] == 'connected':
             fc_layer = OrderedDict()
             fc_layer['bottom'] = bottom
@@ -384,7 +473,7 @@ def cfg2prototxt(cfgfile):
             fc_layer['inner_product_param'] = fc_param
             layers.append(fc_layer)
             bottom = fc_layer['top']
- 
+
             if block['activation'] != 'linear':
                 relu_layer = OrderedDict()
                 relu_layer['bottom'] = bottom
@@ -405,12 +494,12 @@ def cfg2prototxt(cfgfile):
             print('unknow layer type %s ' % block['type'])
             topnames[layer_id] = bottom
             layer_id = layer_id + 1
- 
+
     net_info = OrderedDict()
     net_info['props'] = props
     net_info['layers'] = layers
     return net_info
- 
+
 if __name__ == '__main__':
     import sys
     if len(sys.argv) != 5:
@@ -419,7 +508,7 @@ if __name__ == '__main__':
         print('')
         print('please add name field for each block to avoid generated name')
         exit()
- 
+
     cfgfile = sys.argv[1]
     #net_info = cfg2prototxt(cfgfile)
     #print_prototxt(net_info)

@@ -1,1 +1,1 @@
-python darknet2caffe.py voc.cfg  yolov3_tiny.weights yolov3-tiny.prototxt yolov3-tiny.caffemodel
+python darknet2caffe.py yolov3/yolov3-spp.cfg yolov3/yolov3-spp.weights yolov3/yolov3-spp.prototxt yolov3/yolov3-spp.caffemodel
